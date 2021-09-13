@@ -21,6 +21,8 @@ struct Opt {
     repo: Option<PathBuf>,
     #[structopt(short, long, help = "Branch name")]
     branch: Option<String>,
+    #[structopt(short, long, help = "Verbose flag")]
+    verbose: bool,
     #[structopt(short, long, help = "Add an entry to list of extensions to search")]
     extensions: Vec<String>,
     #[structopt(
@@ -56,6 +58,7 @@ struct Settings {
     pattern: Regex,
     repo: PathBuf,
     branch: Option<String>,
+    verbose: bool,
     extensions: HashSet<OsString>,
     ignore_dirs: HashSet<OsString>,
 }
@@ -81,6 +84,7 @@ impl TryFrom<Opt> for Settings {
             )
             .expect("Canonicalized path"),
             branch: src.branch,
+            verbose: src.verbose,
             extensions: if src.extensions.is_empty() {
                 default_exts.iter().map(|ext| ext[1..].into()).collect()
             } else {
@@ -182,14 +186,17 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
             .filter(|reference| !checked_commits.contains(reference))
             .map(|id| repo.find_commit(id))
             .collect::<std::result::Result<Vec<_>, git2::Error>>()?;
-        eprintln!(
-            "[{}] {} Matches in {} files {} skipped blobs... Next round has {} refs...",
-            iter,
-            all_matches.len(),
-            walked,
-            skipped_blobs,
-            next_refs.len()
-        );
+
+        if settings.verbose {
+            eprintln!(
+                "[{}] {} Matches in {} files {} skipped blobs... Next round has {} refs...",
+                iter,
+                all_matches.len(),
+                walked,
+                skipped_blobs,
+                next_refs.len()
+            );
+        }
         iter += 1;
         if next_refs.is_empty() {
             break;
