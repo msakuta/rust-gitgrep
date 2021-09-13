@@ -106,7 +106,7 @@ impl TryFrom<Opt> for Settings {
 fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry>> {
     let mut walked = 0;
     let repo = Repository::open(&settings.repo)?;
-    let mut i = 0;
+    let mut skipped_blobs = 0;
     let mut all_matches = vec![];
     let reference = if let Some(ref branch) = settings.branch {
         repo.resolve_reference_from_short_name(&branch)?
@@ -114,7 +114,9 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
         repo.head()?
     };
 
+    let mut checked_blobs = HashSet::new();
     let mut checked_commits = HashSet::new();
+    let mut iter = 0;
 
     let mut next_refs = vec![reference.peel_to_commit()?];
     loop {
@@ -154,13 +156,18 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
                             return None;
                         }
 
+                        if checked_blobs.contains(&blob.id()) {
+                            skipped_blobs += 1;
+                            return None;
+                        }
+
+                        checked_blobs.insert(blob.id());
+
                         let ret = process_file(settings, commit, blob.content(), path);
                         Some(ret)
                     })() {
                         Some(matches) => {
                             all_matches.extend(matches);
-
-                            i += 1;
                         }
                         _ => (),
                     }
@@ -176,11 +183,14 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
             .map(|id| repo.find_commit(id))
             .collect::<std::result::Result<Vec<_>, git2::Error>>()?;
         eprintln!(
-            "{} Matches in {} files... Next round has {} refs...",
+            "[{}] {} Matches in {} files {} skipped blobs... Next round has {} refs...",
+            iter,
             all_matches.len(),
             walked,
+            skipped_blobs,
             next_refs.len()
         );
+        iter += 1;
         if next_refs.is_empty() {
             break;
         }
@@ -206,10 +216,11 @@ fn process_file(
     //     };
     //     linecount += 1;
     //     linepos += line_str.len();
+    let input_str = String::from_utf8_lossy(input);
     for found in settings
         .pattern
         // .find_iter(&String::from_utf8_lossy(line_str.as_bytes()))
-        .find_iter(&String::from_utf8_lossy(input))
+        .find_iter(&input_str)
     {
         ret.push(MatchEntry {
             commit: commit.id(),
@@ -223,7 +234,7 @@ fn process_file(
             filepath.to_string_lossy(),
             linecount,
             // line_str
-            String::from_utf8_lossy(&input[found.range()])
+            &input_str[found.range()]
         );
         // break;
         // }
