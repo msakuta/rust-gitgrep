@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use dunce::canonicalize;
 use git2::{Repository, TreeWalkResult};
+use regex::Regex;
 use std::{
-    cmp::Reverse,
     collections::{HashMap, HashSet},
+    convert::{TryFrom, TryInto},
     env,
     ffi::OsString,
     fs::File,
@@ -14,6 +15,8 @@ use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 struct Opt {
+    #[structopt(help = "The pattern to search for")]
+    pattern: String,
     #[structopt(help = "Root repo to grep")]
     repo: Option<PathBuf>,
     #[structopt(help = "Branch name")]
@@ -29,7 +32,7 @@ struct Opt {
 }
 
 fn main() -> Result<()> {
-    let settings: Settings = Opt::from_args().into();
+    let settings: Settings = Opt::from_args().try_into()?;
 
     eprintln!(
         "Searching path: {:?} extensions: {:?} ignore_dirs: {:?}",
@@ -49,6 +52,7 @@ struct FileEntry {
 
 #[derive(Debug)]
 struct Settings {
+    pattern: Regex,
     repo: PathBuf,
     branch: Option<String>,
     extensions: HashSet<OsString>,
@@ -57,15 +61,18 @@ struct Settings {
 
 // It's a bit awkward to convert from Opt to Settings, but some settings are hard to write
 // conversion code inside structopt annotations.
-impl From<Opt> for Settings {
-    fn from(src: Opt) -> Self {
+impl TryFrom<Opt> for Settings {
+    type Error = anyhow::Error;
+
+    fn try_from(src: Opt) -> std::result::Result<Self, Self::Error> {
         let default_exts = [
             ".sh", ".js", ".tcl", ".pl", ".py", ".rb", ".c", ".cpp", ".h", ".rc", ".rci", ".dlg",
             ".pas", ".dpr", ".cs", ".rs",
         ];
         let default_ignore_dirs = [".hg", ".svn", ".git", ".bzr", "node_modules", "target"]; // Probably we could ignore all directories beginning with a dot.
 
-        Self {
+        Ok(Self {
+            pattern: Regex::new(&src.pattern).map_err(|e| anyhow!("Error in regex compilation"))?,
             repo: canonicalize(
                 src.repo.unwrap_or_else(|| {
                     PathBuf::from(env::current_dir().unwrap().to_str().unwrap())
@@ -91,7 +98,7 @@ impl From<Opt> for Settings {
                     .chain(src.ignore_dirs.iter().map(|ext| ext.into()))
                     .collect()
             },
-        }
+        })
     }
 }
 
@@ -155,24 +162,37 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<FileEntry>
 
 fn process_file(
     settings: &Settings,
-    fp: impl std::io::Read,
+    input: &[u8],
     filepath: PathBuf,
     i: usize,
     filesize: u64,
 ) -> Option<FileEntry> {
-    let reader = BufReader::new(fp).lines();
-    let linecount = reader.count();
-
-    println!(
-        "{0}\t{1:5}\t{2}",
-        i + 1,
-        linecount,
-        filepath.to_string_lossy()
-    );
+    let mut linecount = 0;
+    let mut linepos = 0;
+    let reader = BufReader::new(input).lines();
+    for line in reader {
+        let line_str = line.ok()?;
+        linecount += 1;
+        linepos += line_str.len();
+        for found in settings
+            .pattern
+            .find_iter(&String::from_utf8_lossy(line_str.as_bytes()))
+        {
+            // if found.start() < linepos {
+            println!(
+                "{}({}): {}",
+                filepath.to_string_lossy(),
+                linecount,
+                line_str
+            );
+            break;
+            // }
+        }
+    }
 
     Some(FileEntry {
         name: filepath,
-        lines: linecount,
+        lines: 0,
         size: filesize,
     })
 }
