@@ -113,6 +113,8 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<FileEntry>
         repo.head()?
     };
 
+    let mut checked_commits = HashSet::new();
+
     let mut next_refs = vec![reference.peel_to_commit()?];
     loop {
         for commit in &next_refs {
@@ -149,12 +151,15 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<FileEntry>
 
                     let filesize = blob.size() as u64;
 
-                    Some((
-                        ext,
-                        process_file(settings, commit, blob.content(), path, filesize)?,
-                    ))
+                    if !checked_commits.contains(&commit.id()) {
+                        let ret = process_file(settings, commit, blob.content(), path, filesize)?;
+                        checked_commits.insert(commit.id());
+                        Some(ret)
+                    } else {
+                        None
+                    }
                 })() {
-                    Some((ext, file_entry)) => {
+                    Some(file_entry) => {
                         files.push(file_entry);
 
                         i += 1;
@@ -170,6 +175,7 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<FileEntry>
             .flatten()
             .map(|id| repo.find_commit(id))
             .collect::<std::result::Result<Vec<_>, git2::Error>>()?;
+        eprintln!("Next round has {} refs...", next_refs.len());
         if next_refs.is_empty() {
             break;
         }
