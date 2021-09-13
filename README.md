@@ -19,7 +19,7 @@ So I made a command line utility to do exactly what I wanted, plus some exercise
 ## Prerequisites
 
 * Cargo 1.55.0
-
+* libssl-dev (on Ubuntu) or OpenSSL development headers and libraries on corresponding platforms
 
 ## Run
 
