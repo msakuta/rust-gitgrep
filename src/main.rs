@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use dunce::canonicalize;
-use git2::{Commit, Repository, TreeWalkResult};
+use git2::{Commit, Oid, Repository, TreeWalkResult};
 use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
@@ -44,10 +44,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-struct FileEntry {
-    name: PathBuf,
-    lines: usize,
-    size: u64,
+struct MatchEntry {
+    commit: Oid,
+    path: PathBuf,
+    start: usize,
+    end: usize,
 }
 
 #[derive(Debug)]
@@ -102,11 +103,11 @@ impl TryFrom<Opt> for Settings {
     }
 }
 
-fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<FileEntry>> {
+fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry>> {
     let mut walked = 0;
     let repo = Repository::open(&settings.repo)?;
     let mut i = 0;
-    let mut files = vec![];
+    let mut all_matches = vec![];
     let reference = if let Some(ref branch) = settings.branch {
         repo.resolve_reference_from_short_name(&branch)?
     } else {
@@ -123,65 +124,68 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<FileEntry>
             } else {
                 continue;
             };
-            tree.walk(git2::TreeWalkMode::PostOrder, |_, entry| {
-                match (|| {
-                    let name = entry.name()?;
-                    if entry.kind() != Some(git2::ObjectType::Blob)
-                        || settings.ignore_dirs.contains(&OsString::from(name))
-                    {
-                        return None;
-                    }
-                    let obj = match entry.to_object(&repo) {
-                        Ok(obj) => obj,
-                        Err(e) => {
-                            eprintln!("couldn't get_object: {:?}", e);
+            if !checked_commits.contains(&commit.id()) {
+                checked_commits.insert(commit.id());
+
+                tree.walk(git2::TreeWalkMode::PostOrder, |_, entry| {
+                    walked += 1;
+
+                    match (|| {
+                        let name = entry.name()?;
+                        if entry.kind() != Some(git2::ObjectType::Blob)
+                            || settings.ignore_dirs.contains(&OsString::from(name))
+                        {
                             return None;
                         }
-                    };
-                    let blob = obj.peel_to_blob().ok()?;
-                    walked += 1;
-                    if blob.is_binary() {
-                        return None;
-                    }
-                    let path: PathBuf = entry.name()?.into();
-                    let ext = path.extension()?.to_owned();
-                    if !settings.extensions.contains(&ext.to_ascii_lowercase()) {
-                        return None;
-                    }
+                        let obj = match entry.to_object(&repo) {
+                            Ok(obj) => obj,
+                            Err(e) => {
+                                eprintln!("couldn't get_object: {:?}", e);
+                                return None;
+                            }
+                        };
+                        let blob = obj.peel_to_blob().ok()?;
+                        if blob.is_binary() {
+                            return None;
+                        }
+                        let path: PathBuf = entry.name()?.into();
+                        let ext = path.extension()?.to_owned();
+                        if !settings.extensions.contains(&ext.to_ascii_lowercase()) {
+                            return None;
+                        }
 
-                    let filesize = blob.size() as u64;
-
-                    if !checked_commits.contains(&commit.id()) {
-                        let ret = process_file(settings, commit, blob.content(), path, filesize)?;
-                        checked_commits.insert(commit.id());
+                        let ret = process_file(settings, commit, blob.content(), path);
                         Some(ret)
-                    } else {
-                        None
-                    }
-                })() {
-                    Some(file_entry) => {
-                        files.push(file_entry);
+                    })() {
+                        Some(matches) => {
+                            all_matches.extend(matches);
 
-                        i += 1;
+                            i += 1;
+                        }
+                        _ => (),
                     }
-                    _ => (),
-                }
-                TreeWalkResult::Ok
-            })?;
+                    TreeWalkResult::Ok
+                })?;
+            }
         }
         next_refs = next_refs
             .iter()
-            .filter_map(|reference| Some(reference.parent_ids()))
+            .map(|reference| reference.parent_ids())
             .flatten()
+            .filter(|reference| !checked_commits.contains(reference))
             .map(|id| repo.find_commit(id))
             .collect::<std::result::Result<Vec<_>, git2::Error>>()?;
-        eprintln!("Next round has {} refs...", next_refs.len());
+        eprintln!(
+            "{} Matches in {} files... Next round has {} refs...",
+            all_matches.len(),
+            walked,
+            next_refs.len()
+        );
         if next_refs.is_empty() {
             break;
         }
     }
-    eprintln!("Listing {}/{} files...", files.len(), walked);
-    Ok(files)
+    Ok(all_matches)
 }
 
 fn process_file(
@@ -189,35 +193,42 @@ fn process_file(
     commit: &Commit,
     input: &[u8],
     filepath: PathBuf,
-    filesize: u64,
-) -> Option<FileEntry> {
+) -> Vec<MatchEntry> {
     let mut linecount = 0;
     let mut linepos = 0;
+    let mut ret = vec![];
     let reader = BufReader::new(input).lines();
-    for line in reader {
-        let line_str = line.ok()?;
-        linecount += 1;
-        linepos += line_str.len();
-        for found in settings
-            .pattern
-            .find_iter(&String::from_utf8_lossy(line_str.as_bytes()))
-        {
-            // if found.start() < linepos {
-            println!(
-                "{} {}({}): {}",
-                commit.id(),
-                filepath.to_string_lossy(),
-                linecount,
-                line_str
-            );
-            break;
-            // }
-        }
+    // for line in reader {
+    //     let line_str = if let Ok(line) = line {
+    //         line
+    //     } else {
+    //         continue;
+    //     };
+    //     linecount += 1;
+    //     linepos += line_str.len();
+    for found in settings
+        .pattern
+        // .find_iter(&String::from_utf8_lossy(line_str.as_bytes()))
+        .find_iter(&String::from_utf8_lossy(input))
+    {
+        ret.push(MatchEntry {
+            commit: commit.id(),
+            path: filepath.clone(),
+            start: found.start(),
+            end: found.end(),
+        });
+        println!(
+            "{} {}({}): {}",
+            commit.id(),
+            filepath.to_string_lossy(),
+            linecount,
+            // line_str
+            String::from_utf8_lossy(&input[found.range()])
+        );
+        // break;
+        // }
     }
+    // }
 
-    Some(FileEntry {
-        name: filepath,
-        lines: 0,
-        size: filesize,
-    })
+    ret
 }
