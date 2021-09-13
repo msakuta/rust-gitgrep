@@ -19,6 +19,8 @@ struct Opt {
     repo: Option<PathBuf>,
     #[structopt(short, long, help = "Branch name")]
     branch: Option<String>,
+    #[structopt(short = "o", long, help = "Turn off showing matches to a file only once; if the same file with the same name has different versions that matches, they will not be printed.")]
+    no_once_file: bool,
     #[structopt(short, long, help = "Verbose flag")]
     verbose: bool,
     #[structopt(short, long, help = "Add an entry to list of extensions to search")]
@@ -57,6 +59,7 @@ struct Settings {
     pattern: Regex,
     repo: PathBuf,
     branch: Option<String>,
+    once_file: bool,
     verbose: bool,
     extensions: HashSet<OsString>,
     ignore_dirs: HashSet<OsString>,
@@ -84,6 +87,7 @@ impl TryFrom<Opt> for Settings {
             )
             .expect("Canonicalized path"),
             branch: src.branch,
+            once_file: !src.no_once_file,
             verbose: src.verbose,
             extensions: if src.extensions.is_empty() {
                 default_exts.iter().map(|ext| ext[1..].into()).collect()
@@ -118,6 +122,7 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
         repo.head()?
     };
 
+    let mut checked_paths = HashSet::new();
     let mut checked_blobs = HashSet::new();
     let mut checked_commits = HashSet::new();
     let mut iter = 0;
@@ -143,6 +148,13 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
                         {
                             return None;
                         }
+
+                        // We want to match with absolute path from root, but it seems impossible with `tree.walk`.
+                        if settings.once_file && checked_paths.contains(name) {
+                            return None;
+                        }
+                        checked_paths.insert(name.to_owned());
+
                         let obj = match entry.to_object(&repo) {
                             Ok(obj) => obj,
                             Err(e) => {
