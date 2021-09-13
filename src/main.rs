@@ -19,7 +19,11 @@ struct Opt {
     repo: Option<PathBuf>,
     #[structopt(short, long, help = "Branch name")]
     branch: Option<String>,
-    #[structopt(short = "o", long, help = "Turn off showing matches to a file only once; if the same file with the same name has different versions that matches, they will not be printed.")]
+    #[structopt(
+        short = "o",
+        long,
+        help = "Turn off showing matches to a file only once; the default behavior is that if the same file with the same name has different versions that matches, they will not be printed."
+    )]
     no_once_file: bool,
     #[structopt(short, long, help = "Verbose flag")]
     verbose: bool,
@@ -225,7 +229,13 @@ fn process_file(
 ) -> Vec<MatchEntry> {
     let mut ret = vec![];
 
-    let input_str = String::from_utf8_lossy(input);
+    // Non-utf8 files are not supported.
+    let input_str = if let Ok(utf8) = std::str::from_utf8(&input) {
+        utf8
+    } else {
+        return vec![];
+    };
+
     for found in settings.pattern.find_iter(&input_str) {
         ret.push(MatchEntry {
             commit: commit.id(),
@@ -237,9 +247,18 @@ fn process_file(
         // Very naive way to count line numbers. Assumes newlines would not be part of multibyte
         // character, which is true for utf8 that is the only supported encoding in Rust anyway.
         let mut line_number = 1;
-        for i in 0..found.start() {
-            if input[i] == b'\n' {
+        let mut line_start = 0;
+        let mut line_end = 0;
+        for (i, c) in input.iter().enumerate() {
+            if *c == b'\n' {
                 line_number += 1;
+                if i < found.start() {
+                    line_start = (i + 1).min(input.len());
+                }
+                if found.end() <= i {
+                    line_end = ((i as isize - 1) as usize).max(line_start);
+                    break;
+                }
             }
         }
 
@@ -248,7 +267,7 @@ fn process_file(
             commit.id(),
             filepath.to_string_lossy(),
             line_number,
-            &input_str[found.range()]
+            &input_str[line_start..line_end]
         );
     }
 
