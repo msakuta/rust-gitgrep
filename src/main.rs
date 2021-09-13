@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use dunce::canonicalize;
-use git2::{Repository, TreeWalkResult};
+use git2::{Commit, Repository, TreeWalkResult};
 use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
@@ -19,7 +19,7 @@ struct Opt {
     pattern: String,
     #[structopt(help = "Root repo to grep")]
     repo: Option<PathBuf>,
-    #[structopt(help = "Branch name")]
+    #[structopt(short, long, help = "Branch name")]
     branch: Option<String>,
     #[structopt(short, long, help = "Add an entry to list of extensions to search")]
     extensions: Vec<String>,
@@ -112,59 +112,77 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<FileEntry>
     } else {
         repo.head()?
     };
-    reference
-        .peel_to_tree()?
-        .walk(git2::TreeWalkMode::PostOrder, |_, entry| {
-            match (|| {
-                let name = entry.name()?;
-                if entry.kind() != Some(git2::ObjectType::Blob)
-                    || settings.ignore_dirs.contains(&OsString::from(name))
-                {
-                    return None;
-                }
-                let obj = match entry.to_object(&repo) {
-                    Ok(obj) => obj,
-                    Err(e) => {
-                        eprintln!("couldn't get_object: {:?}", e);
+
+    let mut next_refs = vec![reference.peel_to_commit()?];
+    loop {
+        for commit in &next_refs {
+            let tree = if let Ok(tree) = commit.tree() {
+                tree
+            } else {
+                continue;
+            };
+            tree.walk(git2::TreeWalkMode::PostOrder, |_, entry| {
+                match (|| {
+                    let name = entry.name()?;
+                    if entry.kind() != Some(git2::ObjectType::Blob)
+                        || settings.ignore_dirs.contains(&OsString::from(name))
+                    {
                         return None;
                     }
-                };
-                let blob = obj.peel_to_blob().ok()?;
-                walked += 1;
-                if blob.is_binary() {
-                    return None;
-                }
-                let path: PathBuf = entry.name()?.into();
-                let ext = path.extension()?.to_owned();
-                if !settings.extensions.contains(&ext.to_ascii_lowercase()) {
-                    return None;
-                }
+                    let obj = match entry.to_object(&repo) {
+                        Ok(obj) => obj,
+                        Err(e) => {
+                            eprintln!("couldn't get_object: {:?}", e);
+                            return None;
+                        }
+                    };
+                    let blob = obj.peel_to_blob().ok()?;
+                    walked += 1;
+                    if blob.is_binary() {
+                        return None;
+                    }
+                    let path: PathBuf = entry.name()?.into();
+                    let ext = path.extension()?.to_owned();
+                    if !settings.extensions.contains(&ext.to_ascii_lowercase()) {
+                        return None;
+                    }
 
-                let filesize = blob.size() as u64;
+                    let filesize = blob.size() as u64;
 
-                Some((
-                    ext,
-                    process_file(settings, blob.content(), path, i, filesize)?,
-                ))
-            })() {
-                Some((ext, file_entry)) => {
-                    files.push(file_entry);
+                    Some((
+                        ext,
+                        process_file(settings, commit, blob.content(), path, filesize)?,
+                    ))
+                })() {
+                    Some((ext, file_entry)) => {
+                        files.push(file_entry);
 
-                    i += 1;
+                        i += 1;
+                    }
+                    _ => (),
                 }
-                _ => (),
-            }
-            TreeWalkResult::Ok
-        })?;
+                TreeWalkResult::Ok
+            })?;
+        }
+        next_refs = next_refs
+            .iter()
+            .filter_map(|reference| Some(reference.parent_ids()))
+            .flatten()
+            .map(|id| repo.find_commit(id))
+            .collect::<std::result::Result<Vec<_>, git2::Error>>()?;
+        if next_refs.is_empty() {
+            break;
+        }
+    }
     eprintln!("Listing {}/{} files...", files.len(), walked);
     Ok(files)
 }
 
 fn process_file(
     settings: &Settings,
+    commit: &Commit,
     input: &[u8],
     filepath: PathBuf,
-    i: usize,
     filesize: u64,
 ) -> Option<FileEntry> {
     let mut linecount = 0;
@@ -180,7 +198,8 @@ fn process_file(
         {
             // if found.start() < linepos {
             println!(
-                "{}({}): {}",
+                "{} {}({}): {}",
+                commit.id(),
                 filepath.to_string_lossy(),
                 linecount,
                 line_str
