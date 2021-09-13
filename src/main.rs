@@ -3,12 +3,10 @@ use dunce::canonicalize;
 use git2::{Commit, Oid, Repository, TreeWalkResult};
 use regex::Regex;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     convert::{TryFrom, TryInto},
     env,
     ffi::OsString,
-    fs::File,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 use structopt::StructOpt;
@@ -41,11 +39,12 @@ fn main() -> Result<()> {
         settings.repo, settings.extensions, settings.ignore_dirs
     );
 
-    let file_list = process_files_git(&settings.repo, &settings)?;
+    let _file_list = process_files_git(&settings.repo, &settings)?;
 
     Ok(())
 }
 
+#[allow(dead_code)]
 struct MatchEntry {
     commit: Oid,
     path: PathBuf,
@@ -76,7 +75,8 @@ impl TryFrom<Opt> for Settings {
         let default_ignore_dirs = [".hg", ".svn", ".git", ".bzr", "node_modules", "target"]; // Probably we could ignore all directories beginning with a dot.
 
         Ok(Self {
-            pattern: Regex::new(&src.pattern).map_err(|e| anyhow!("Error in regex compilation"))?,
+            pattern: Regex::new(&src.pattern)
+                .map_err(|e| anyhow!("Error in regex compilation: {:?}", e))?,
             repo: canonicalize(
                 src.repo.unwrap_or_else(|| {
                     PathBuf::from(env::current_dir().unwrap().to_str().unwrap())
@@ -211,42 +211,34 @@ fn process_file(
     input: &[u8],
     filepath: PathBuf,
 ) -> Vec<MatchEntry> {
-    let mut linecount = 0;
-    let mut linepos = 0;
     let mut ret = vec![];
-    let reader = BufReader::new(input).lines();
-    // for line in reader {
-    //     let line_str = if let Ok(line) = line {
-    //         line
-    //     } else {
-    //         continue;
-    //     };
-    //     linecount += 1;
-    //     linepos += line_str.len();
+
     let input_str = String::from_utf8_lossy(input);
-    for found in settings
-        .pattern
-        // .find_iter(&String::from_utf8_lossy(line_str.as_bytes()))
-        .find_iter(&input_str)
-    {
+    for found in settings.pattern.find_iter(&input_str) {
         ret.push(MatchEntry {
             commit: commit.id(),
             path: filepath.clone(),
             start: found.start(),
             end: found.end(),
         });
+
+        // Very naive way to count line numbers. Assumes newlines would not be part of multibyte
+        // character, which is true for utf8 that is the only supported encoding in Rust anyway.
+        let mut line_number = 1;
+        for i in 0..found.start() {
+            if input[i] == b'\n' {
+                line_number += 1;
+            }
+        }
+
         println!(
             "{} {}({}): {}",
             commit.id(),
             filepath.to_string_lossy(),
-            linecount,
-            // line_str
+            line_number,
             &input_str[found.range()]
         );
-        // break;
-        // }
     }
-    // }
 
     ret
 }
