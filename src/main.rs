@@ -4,7 +4,7 @@ use dunce::canonicalize;
 use git2::{Commit, ObjectType, Oid, Repository, Tree};
 use regex::Regex;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     convert::{TryFrom, TryInto},
     env,
     ffi::OsString,
@@ -32,6 +32,12 @@ struct Opt {
         help = "Disable color coding for the output, default is to use colors in terminal"
     )]
     no_color_code: bool,
+    #[structopt(
+        short = "g",
+        long,
+        help = "Disable output grouping. Better for machine inputs"
+    )]
+    no_output_grouping: bool,
     #[structopt(short, long, help = "Verbose flag")]
     verbose: bool,
     #[structopt(short, long, help = "Add an entry to list of extensions to search")]
@@ -72,6 +78,7 @@ struct Settings {
     branch: Option<String>,
     once_file: bool,
     color_code: bool,
+    output_grouping: bool,
     verbose: bool,
     extensions: HashSet<OsString>,
     ignore_dirs: HashSet<OsString>,
@@ -101,6 +108,7 @@ impl TryFrom<Opt> for Settings {
             branch: src.branch,
             once_file: !src.no_once_file,
             color_code: !src.no_color_code,
+            output_grouping: !src.no_output_grouping,
             verbose: src.verbose,
             extensions: if src.extensions.is_empty() {
                 default_exts.iter().map(|ext| ext[1..].into()).collect()
@@ -136,7 +144,7 @@ struct ProcessTree<'a> {
 }
 
 impl<'a> ProcessTree<'a> {
-    fn process(&mut self, tree: &Tree, commit: &Commit, path: &Path) {
+    fn process(&mut self, tree: &Tree, commit: &Commit, path: &Path, visited: &mut bool) {
         if self.checked_trees.contains(&tree.id()) {
             return;
         }
@@ -162,7 +170,7 @@ impl<'a> ProcessTree<'a> {
                     }
                 };
                 if obj.kind() == Some(ObjectType::Tree) {
-                    self.process(obj.as_tree()?, commit, &entry_path);
+                    self.process(obj.as_tree()?, commit, &entry_path, visited);
                     return None;
                 }
                 if entry.kind() != Some(ObjectType::Blob)
@@ -186,7 +194,7 @@ impl<'a> ProcessTree<'a> {
                 }
 
                 self.checked_blobs.insert(blob.id());
-                let ret = process_file(self.settings, commit, blob.content(), &entry_path);
+                let ret = process_file(self.settings, commit, blob.content(), &entry_path, visited);
                 Some(ret)
             })() {
                 Some(matches) => {
@@ -216,16 +224,16 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
         skipped_blobs: 0,
         all_matches: vec![],
     };
-    let mut checked_commits = HashSet::new();
+    let mut checked_commits = HashMap::new();
     let mut iter = 0;
 
     let mut next_refs = vec![reference.peel_to_commit()?];
     loop {
         for commit in &next_refs {
-            if checked_commits.contains(&commit.id()) {
+            if checked_commits.contains_key(&commit.id()) {
                 continue;
             }
-            checked_commits.insert(commit.id());
+            let entry = checked_commits.entry(commit.id()).or_insert(false);
 
             let tree = if let Ok(tree) = commit.tree() {
                 tree
@@ -233,13 +241,13 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
                 continue;
             };
 
-            process_tree.process(&tree, commit, &PathBuf::from(""));
+            process_tree.process(&tree, commit, &PathBuf::from(""), entry);
         }
         next_refs = next_refs
             .iter()
             .map(|reference| reference.parent_ids())
             .flatten()
-            .filter(|reference| !checked_commits.contains(reference))
+            .filter(|reference| !checked_commits.contains_key(reference))
             .map(|id| repo.find_commit(id))
             .collect::<std::result::Result<Vec<_>, git2::Error>>()?;
 
@@ -266,6 +274,7 @@ fn process_file(
     commit: &Commit,
     input: &[u8],
     filepath: &Path,
+    visited: &mut bool,
 ) -> Vec<MatchEntry> {
     let mut ret = vec![];
 
@@ -303,21 +312,37 @@ fn process_file(
         }
 
         if settings.color_code {
-            println!(
-                "{} {} {} {}",
-                commit.id().to_string().bright_blue(),
+            if settings.output_grouping && !*visited {
+                println!("\ncommit {}:", commit.id().to_string().bright_blue());
+                *visited = true;
+            }
+            let line = format!(
+                "{} {} {}",
                 filepath.to_string_lossy().green(),
                 &format!("({}):", line_number).bright_yellow(),
                 &input_str[line_start..line_end]
             );
+            if !settings.output_grouping {
+                println!("{} {}", commit.id().to_string().bright_blue(), line);
+            } else {
+                println!("  {}", line);
+            }
         } else {
-            println!(
-                "{} {}({}): {}",
-                commit.id().to_string(),
+            if settings.output_grouping && !*visited {
+                println!("\ncommit {}:", commit.id());
+                *visited = true;
+            }
+            let line = format!(
+                "{}({}): {}",
                 filepath.to_string_lossy(),
                 line_number,
                 &input_str[line_start..line_end]
             );
+            if !settings.output_grouping {
+                println!("{} {}", commit.id(), line);
+            } else {
+                println!("  {}", line);
+            }
         }
     }
 
