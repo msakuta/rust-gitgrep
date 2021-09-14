@@ -3,7 +3,7 @@
 Sometimes I forget where I put an experimental code deep hidden in the repository history.
 Git has nice command line utility to search through all the files in all the history, like so:
 
-    git grep main $(git rev-list HEAD)
+    git grep <pattern> $(git rev-list HEAD)
 
 but there are 2 problems.
 
