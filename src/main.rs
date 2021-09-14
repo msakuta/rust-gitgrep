@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use dunce::canonicalize;
-use git2::{Commit, Oid, Repository, TreeWalkResult};
+use git2::{Commit, ObjectType, Oid, Repository, Tree};
 use regex::Regex;
 use std::{
     collections::HashSet,
@@ -115,85 +115,115 @@ impl TryFrom<Opt> for Settings {
     }
 }
 
+struct ProcessTree<'a> {
+    settings: &'a Settings,
+    repo: &'a Repository,
+    checked_paths: HashSet<String>,
+    checked_blobs: HashSet<Oid>,
+    checked_trees: HashSet<Oid>,
+    walked: usize,
+    skipped_blobs: usize,
+    all_matches: Vec<MatchEntry>,
+}
+
+impl<'a> ProcessTree<'a> {
+    fn process(&mut self, tree: &Tree, commit: &Commit) {
+        if self.checked_trees.contains(&tree.id()) {
+            return;
+        }
+        self.checked_trees.insert(tree.id());
+        self.walked += 1;
+
+        for entry in tree {
+            match (|| {
+                let name = entry.name()?;
+                if entry.kind() != Some(git2::ObjectType::Blob)
+                    || self.settings.ignore_dirs.contains(&OsString::from(name))
+                {
+                    return None;
+                }
+
+                // We want to match with absolute path from root, but it seems impossible with `tree.walk`.
+                if self.settings.once_file && self.checked_paths.contains(name) {
+                    return None;
+                }
+                self.checked_paths.insert(name.to_owned());
+
+                let obj = match entry.to_object(&self.repo) {
+                    Ok(obj) => obj,
+                    Err(e) => {
+                        eprintln!("couldn't get_object: {:?}", e);
+                        return None;
+                    }
+                };
+                if obj.kind() == Some(ObjectType::Tree) {
+                    self.process(obj.as_tree()?, commit);
+                    return None;
+                }
+                let blob = obj.peel_to_blob().ok()?;
+                if blob.is_binary() {
+                    return None;
+                }
+                let path: PathBuf = entry.name()?.into();
+                let ext = path.extension()?.to_owned();
+                if !self.settings.extensions.contains(&ext.to_ascii_lowercase()) {
+                    return None;
+                }
+
+                if self.checked_blobs.contains(&blob.id()) {
+                    self.skipped_blobs += 1;
+                    return None;
+                }
+
+                self.checked_blobs.insert(blob.id());
+                let ret = process_file(self.settings, commit, blob.content(), path);
+                Some(ret)
+            })() {
+                Some(matches) => {
+                    self.all_matches.extend(matches);
+                }
+                _ => (),
+            }
+        }
+    }
+}
+
 fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry>> {
-    let mut walked = 0;
     let repo = Repository::open(&settings.repo)?;
-    let mut skipped_blobs = 0;
-    let mut all_matches = vec![];
     let reference = if let Some(ref branch) = settings.branch {
         repo.resolve_reference_from_short_name(&branch)?
     } else {
         repo.head()?
     };
 
-    let mut checked_paths = HashSet::new();
-    let mut checked_blobs = HashSet::new();
+    let mut process_tree = ProcessTree {
+        settings,
+        repo: &repo,
+        checked_paths: HashSet::new(),
+        checked_blobs: HashSet::new(),
+        checked_trees: HashSet::new(),
+        walked: 0,
+        skipped_blobs: 0,
+        all_matches: vec![],
+    };
     let mut checked_commits = HashSet::new();
     let mut iter = 0;
 
     let mut next_refs = vec![reference.peel_to_commit()?];
     loop {
         for commit in &next_refs {
+            if checked_commits.contains(&commit.id()) {
+                continue;
+            }
+            checked_commits.insert(commit.id());
+
             let tree = if let Ok(tree) = commit.tree() {
                 tree
             } else {
                 continue;
             };
-            if !checked_commits.contains(&commit.id()) {
-                checked_commits.insert(commit.id());
 
-                tree.walk(git2::TreeWalkMode::PostOrder, |_, entry| {
-                    walked += 1;
-
-                    match (|| {
-                        let name = entry.name()?;
-                        if entry.kind() != Some(git2::ObjectType::Blob)
-                            || settings.ignore_dirs.contains(&OsString::from(name))
-                        {
-                            return None;
-                        }
-
-                        // We want to match with absolute path from root, but it seems impossible with `tree.walk`.
-                        if settings.once_file && checked_paths.contains(name) {
-                            return None;
-                        }
-                        checked_paths.insert(name.to_owned());
-
-                        let obj = match entry.to_object(&repo) {
-                            Ok(obj) => obj,
-                            Err(e) => {
-                                eprintln!("couldn't get_object: {:?}", e);
-                                return None;
-                            }
-                        };
-                        let blob = obj.peel_to_blob().ok()?;
-                        if blob.is_binary() {
-                            return None;
-                        }
-                        let path: PathBuf = entry.name()?.into();
-                        let ext = path.extension()?.to_owned();
-                        if !settings.extensions.contains(&ext.to_ascii_lowercase()) {
-                            return None;
-                        }
-
-                        if checked_blobs.contains(&blob.id()) {
-                            skipped_blobs += 1;
-                            return None;
-                        }
-
-                        checked_blobs.insert(blob.id());
-
-                        let ret = process_file(settings, commit, blob.content(), path);
-                        Some(ret)
-                    })() {
-                        Some(matches) => {
-                            all_matches.extend(matches);
-                        }
-                        _ => (),
-                    }
-                    TreeWalkResult::Ok
-                })?;
-            }
+            process_tree.process(&tree, commit);
         }
         next_refs = next_refs
             .iter()
@@ -207,9 +237,9 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
             eprintln!(
                 "[{}] {} Matches in {} files {} skipped blobs... Next round has {} refs...",
                 iter,
-                all_matches.len(),
-                walked,
-                skipped_blobs,
+                process_tree.all_matches.len(),
+                process_tree.walked,
+                process_tree.skipped_blobs,
                 next_refs.len()
             );
         }
@@ -218,7 +248,7 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
             break;
         }
     }
-    Ok(all_matches)
+    Ok(process_tree.all_matches)
 }
 
 fn process_file(
