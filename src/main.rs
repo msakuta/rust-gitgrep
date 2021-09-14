@@ -118,7 +118,7 @@ impl TryFrom<Opt> for Settings {
 struct ProcessTree<'a> {
     settings: &'a Settings,
     repo: &'a Repository,
-    checked_paths: HashSet<String>,
+    checked_paths: HashSet<PathBuf>,
     checked_blobs: HashSet<Oid>,
     checked_trees: HashSet<Oid>,
     walked: usize,
@@ -127,7 +127,7 @@ struct ProcessTree<'a> {
 }
 
 impl<'a> ProcessTree<'a> {
-    fn process(&mut self, tree: &Tree, commit: &Commit) {
+    fn process(&mut self, tree: &Tree, commit: &Commit, path: &Path) {
         if self.checked_trees.contains(&tree.id()) {
             return;
         }
@@ -137,17 +137,13 @@ impl<'a> ProcessTree<'a> {
         for entry in tree {
             match (|| {
                 let name = entry.name()?;
-                if entry.kind() != Some(git2::ObjectType::Blob)
-                    || self.settings.ignore_dirs.contains(&OsString::from(name))
-                {
-                    return None;
-                }
+                let entry_path = path.join(name);
 
                 // We want to match with absolute path from root, but it seems impossible with `tree.walk`.
-                if self.settings.once_file && self.checked_paths.contains(name) {
+                if self.settings.once_file && self.checked_paths.contains(&entry_path) {
                     return None;
                 }
-                self.checked_paths.insert(name.to_owned());
+                self.checked_paths.insert(entry_path.clone());
 
                 let obj = match entry.to_object(&self.repo) {
                     Ok(obj) => obj,
@@ -157,15 +153,20 @@ impl<'a> ProcessTree<'a> {
                     }
                 };
                 if obj.kind() == Some(ObjectType::Tree) {
-                    self.process(obj.as_tree()?, commit);
+                    self.process(obj.as_tree()?, commit, &entry_path);
                     return None;
                 }
+                if entry.kind() != Some(git2::ObjectType::Blob)
+                    || self.settings.ignore_dirs.contains(&OsString::from(name))
+                {
+                    return None;
+                }
+
                 let blob = obj.peel_to_blob().ok()?;
                 if blob.is_binary() {
                     return None;
                 }
-                let path: PathBuf = entry.name()?.into();
-                let ext = path.extension()?.to_owned();
+                let ext = PathBuf::from(name).extension()?.to_owned();
                 if !self.settings.extensions.contains(&ext.to_ascii_lowercase()) {
                     return None;
                 }
@@ -176,7 +177,7 @@ impl<'a> ProcessTree<'a> {
                 }
 
                 self.checked_blobs.insert(blob.id());
-                let ret = process_file(self.settings, commit, blob.content(), path);
+                let ret = process_file(self.settings, commit, blob.content(), &entry_path);
                 Some(ret)
             })() {
                 Some(matches) => {
@@ -223,7 +224,7 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
                 continue;
             };
 
-            process_tree.process(&tree, commit);
+            process_tree.process(&tree, commit, &PathBuf::from(""));
         }
         next_refs = next_refs
             .iter()
@@ -255,7 +256,7 @@ fn process_file(
     settings: &Settings,
     commit: &Commit,
     input: &[u8],
-    filepath: PathBuf,
+    filepath: &Path,
 ) -> Vec<MatchEntry> {
     let mut ret = vec![];
 
@@ -269,7 +270,7 @@ fn process_file(
     for found in settings.pattern.find_iter(&input_str) {
         ret.push(MatchEntry {
             commit: commit.id(),
-            path: filepath.clone(),
+            path: filepath.to_path_buf(),
             start: found.start(),
             end: found.end(),
         });
