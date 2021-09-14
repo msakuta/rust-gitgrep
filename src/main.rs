@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use colored::*;
 use dunce::canonicalize;
 use git2::{Commit, ObjectType, Oid, Repository, Tree};
 use regex::Regex;
@@ -25,6 +26,12 @@ struct Opt {
         help = "Turn off showing matches to a file only once; the default behavior is that if the same file with the same name has different versions that matches, they will not be printed."
     )]
     no_once_file: bool,
+    #[structopt(
+        short = "c",
+        long,
+        help = "Disable color coding for the output, default is to use colors in terminal"
+    )]
+    no_color_code: bool,
     #[structopt(short, long, help = "Verbose flag")]
     verbose: bool,
     #[structopt(short, long, help = "Add an entry to list of extensions to search")]
@@ -64,6 +71,7 @@ struct Settings {
     repo: PathBuf,
     branch: Option<String>,
     once_file: bool,
+    color_code: bool,
     verbose: bool,
     extensions: HashSet<OsString>,
     ignore_dirs: HashSet<OsString>,
@@ -92,6 +100,7 @@ impl TryFrom<Opt> for Settings {
             .expect("Canonicalized path"),
             branch: src.branch,
             once_file: !src.no_once_file,
+            color_code: !src.no_color_code,
             verbose: src.verbose,
             extensions: if src.extensions.is_empty() {
                 default_exts.iter().map(|ext| ext[1..].into()).collect()
@@ -156,7 +165,7 @@ impl<'a> ProcessTree<'a> {
                     self.process(obj.as_tree()?, commit, &entry_path);
                     return None;
                 }
-                if entry.kind() != Some(git2::ObjectType::Blob)
+                if entry.kind() != Some(ObjectType::Blob)
                     || self.settings.ignore_dirs.contains(&OsString::from(name))
                 {
                     return None;
@@ -293,13 +302,23 @@ fn process_file(
             }
         }
 
-        println!(
-            "{} {}({}): {}",
-            commit.id(),
-            filepath.to_string_lossy(),
-            line_number,
-            &input_str[line_start..line_end]
-        );
+        if settings.color_code {
+            println!(
+                "{} {} {} {}",
+                commit.id().to_string().bright_blue(),
+                filepath.to_string_lossy().green(),
+                &format!("({}):", line_number).bright_yellow(),
+                &input_str[line_start..line_end]
+            );
+        } else {
+            println!(
+                "{} {}({}): {}",
+                commit.id().to_string(),
+                filepath.to_string_lossy(),
+                line_number,
+                &input_str[line_start..line_end]
+            );
+        }
     }
 
     ret

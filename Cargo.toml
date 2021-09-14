@@ -11,3 +11,4 @@ dunce = "1.0.2"
 git2 = { version = "0.13.22" }
 anyhow = "1.0.13"
 regex = "1.5"
+colored = "2"
