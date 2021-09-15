@@ -28,6 +28,8 @@ struct Opt {
         help = "Search from all branches. Ignores -b option if given"
     )]
     all: bool,
+    #[structopt(short, long, help = "Depth to search into git commit history")]
+    depth: Option<usize>,
     #[structopt(
         short = "o",
         long,
@@ -85,6 +87,7 @@ struct Settings {
     repo: PathBuf,
     branch: Option<String>,
     all: bool,
+    depth: Option<usize>,
     once_file: bool,
     color_code: bool,
     output_grouping: bool,
@@ -116,6 +119,7 @@ impl TryFrom<Opt> for Settings {
             .expect("Canonicalized path"),
             branch: src.branch,
             all: src.all,
+            depth: src.depth,
             once_file: !src.no_once_file,
             color_code: !src.no_color_code,
             output_grouping: !src.no_output_grouping,
@@ -278,7 +282,7 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
             );
         }
         iter += 1;
-        if next_refs.is_empty() {
+        if next_refs.is_empty() || settings.depth.map(|depth| depth <= iter).unwrap_or(false) {
             break;
         }
     }
