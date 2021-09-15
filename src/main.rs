@@ -14,12 +14,20 @@ use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 struct Opt {
-    #[structopt(help = "The pattern to search for")]
+    #[structopt(
+        help = "The pattern to search for. Shall be a regular expression passed to regex crate."
+    )]
     pattern: String,
     #[structopt(help = "Root repo to grep")]
     repo: Option<PathBuf>,
     #[structopt(short, long, help = "Branch name")]
     branch: Option<String>,
+    #[structopt(
+        short,
+        long,
+        help = "Search from all branches. Ignores -b option if given"
+    )]
+    all: bool,
     #[structopt(
         short = "o",
         long,
@@ -76,6 +84,7 @@ struct Settings {
     pattern: Regex,
     repo: PathBuf,
     branch: Option<String>,
+    all: bool,
     once_file: bool,
     color_code: bool,
     output_grouping: bool,
@@ -106,6 +115,7 @@ impl TryFrom<Opt> for Settings {
             )
             .expect("Canonicalized path"),
             branch: src.branch,
+            all: src.all,
             once_file: !src.no_once_file,
             color_code: !src.no_color_code,
             output_grouping: !src.no_output_grouping,
@@ -227,7 +237,13 @@ fn process_files_git(_root: &Path, settings: &Settings) -> Result<Vec<MatchEntry
     let mut checked_commits = HashMap::new();
     let mut iter = 0;
 
-    let mut next_refs = vec![reference.peel_to_commit()?];
+    let mut next_refs = if settings.all {
+        repo.references()?
+            .map(|refs| refs.and_then(|refb| refb.peel_to_commit()))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    } else {
+        vec![reference.peel_to_commit()?]
+    };
     loop {
         for commit in &next_refs {
             if checked_commits.contains_key(&commit.id()) {
