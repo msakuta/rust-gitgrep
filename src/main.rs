@@ -305,7 +305,7 @@ fn process_file(
                     line_start = (i + 1).min(input.len());
                 }
                 if found.end() <= i {
-                    line_end = ((i as isize - 1) as usize).max(line_start);
+                    line_end = (i as usize).max(line_start);
                     break;
                 }
             }
@@ -316,11 +316,25 @@ fn process_file(
                 println!("\ncommit {}:", commit.id().to_string().bright_blue());
                 *visited = true;
             }
+            let mut content = if line_start < found.start() {
+                input_str[line_start..found.start()].to_owned()
+            } else {
+                "".to_owned()
+            };
+            if found.start() < found.end() {
+                content += &input_str[found.start()..found.end()]
+                    .red()
+                    .bold()
+                    .to_string();
+            }
+            if found.end() < line_end {
+                content += &input_str[found.end()..line_end];
+            }
             let line = format!(
                 "{} {} {}",
                 filepath.to_string_lossy().green(),
                 &format!("({}):", line_number).bright_yellow(),
-                &input_str[line_start..line_end]
+                &content
             );
             if !settings.output_grouping {
                 println!("{} {}", commit.id().to_string().bright_blue(), line);
